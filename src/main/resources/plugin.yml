@@ -1,0 +1,14 @@
+name: Trivia
+main: com.ahhmino.trivia.TriviaPlugin
+version: 1.0.0
+api-version: '1.20'
+description: Server-wide rotating trivia from OpenTriviaDB
+commands:
+  trivia:
+    description: Enable/disable trivia and view status
+    usage: /trivia <enable|disable|status|reload>
+    permission: trivia.manage
+permissions:
+  trivia.manage:
+    description: Allow managing trivia plugin
+    default: op
