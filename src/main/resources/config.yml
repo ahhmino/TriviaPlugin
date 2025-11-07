@@ -2,7 +2,7 @@
 answer_delay_seconds: 15
 
 # Seconds to wait after posting the answer before asking the next question.
-between_questions_delay_seconds: 10
+between_questions_delay_seconds: 15
 
 # Chat prefix for trivia messages. Color codes (&) are allowed.
 chat_prefix: "&dTrivia:&r "
@@ -15,7 +15,7 @@ opentdb:
   # The API endpoint; you can change if you host a mirror.
   url: "https://opentdb.com/api.php"
 
-  amount: 50
+  amount: 100
   category: ""          # omit for any
   difficulty: "easy"    # easy | medium | hard | omit for any
   type: ""           # "multiple" | "boolean" | omit for any

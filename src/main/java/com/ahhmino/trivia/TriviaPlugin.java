@@ -1,6 +1,7 @@
 package com.ahhmino.trivia;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.bukkit.Bukkit;
@@ -19,6 +20,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
@@ -33,7 +35,6 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     private int fetchBatchSize;
     private boolean triviaEnabled;
 
-    // loop state
     private boolean cycleActive = false;
 
     @Override
@@ -41,13 +42,11 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
         saveDefaultConfig();
         loadSettings(getConfig());
 
-        // Ensure executor + tab completer registered explicitly
         if (getCommand("trivia") != null) {
             getCommand("trivia").setExecutor(this);
             getCommand("trivia").setTabCompleter(this);
         }
 
-        // Fetch initial questions
         fetchQuestionsAsync(fetchBatchSize).thenRun(() -> {
             if (triviaEnabled) startLoopIfNeeded();
         });
@@ -97,17 +96,13 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
                 reloadConfig();
                 loadSettings(getConfig());
                 sender.sendMessage(ChatColor.GREEN + "Trivia config reloaded.");
-                // Top up if needed
-                if (queue.isEmpty() && !fetching.get()) {
-                    fetchQuestionsAsync(fetchBatchSize);
-                }
+                if (queue.isEmpty() && !fetching.get()) fetchQuestionsAsync(fetchBatchSize);
                 if (triviaEnabled) startLoopIfNeeded();
             }
             case "now" -> {
                 if (!triviaEnabled) {
                     sender.sendMessage(ChatColor.YELLOW + "Trivia is disabled. Use /trivia enable first.");
                 } else {
-                    // Nudge the loop immediately
                     runOneCycleOrWait();
                     sender.sendMessage(ChatColor.GREEN + "Triggered next trivia cycle.");
                 }
@@ -140,33 +135,41 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     }
 
     private void stopLoop() {
-        cycleActive = false; // scheduled tasks check this flag before continuing
+        cycleActive = false;
     }
 
     private void runOneCycleOrWait() {
         if (!triviaEnabled || !cycleActive) return;
 
-        // If running low, top up asynchronously
         if (queue.size() < Math.max(5, fetchBatchSize / 4) && !fetching.get()) {
             fetchQuestionsAsync(fetchBatchSize);
         }
 
         TriviaQuestion q = queue.pollFirst();
         if (q == null) {
-            // Still waiting on fetch — try again in 5s
+            // Wait for fetch to complete
             Bukkit.getScheduler().runTaskLater(this, this::runOneCycleOrWait, 20L * 5);
             return;
         }
 
+        // Post the question + randomized choices
         broadcastPrefixed(ChatColor.LIGHT_PURPLE + "Question: " + ChatColor.RESET + q.question());
+        List<String> choices = q.choices();
+        char[] letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
+        for (int i = 0; i < choices.size(); i++) {
+            String line = ChatColor.GRAY + "  " + letters[i] + ") " + ChatColor.WHITE + choices.get(i);
+            broadcastPrefixed(line);
+        }
 
-        // After answer delay, post the answer
+        // After answer delay, post the correct answer (letter + text)
         Bukkit.getScheduler().runTaskLater(this, () -> {
             if (!triviaEnabled || !cycleActive) return;
+            int idx = q.correctIndex();
+            String answerLine = ChatColor.GREEN + "Answer: " + ChatColor.RESET
+                    + letters[idx] + ") " + choices.get(idx);
+            broadcastPrefixed(answerLine);
 
-            broadcastPrefixed(ChatColor.GREEN + "Answer: " + ChatColor.RESET + q.answer());
-
-            // After between-questions delay, run next cycle
+            // After between-questions delay, continue
             Bukkit.getScheduler().runTaskLater(this, () -> {
                 if (!triviaEnabled || !cycleActive) return;
                 runOneCycleOrWait();
@@ -191,7 +194,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
         }
 
         String baseUrl = getConfig().getString("opentdb.url", "https://opentdb.com/api.php");
-        String type = Objects.toString(getConfig().getString("opentdb.type", "multiple"), "");
+        String type = Objects.toString(getConfig().getString("opentdb.type", ""), ""); // allow any/boolean/multiple
         String encode = Objects.toString(getConfig().getString("opentdb.encode", "base64"), "base64");
 
         String url = baseUrl + "?amount=" + amount
@@ -224,12 +227,36 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
                         int added = 0;
                         for (int i = 0; i < results.size(); i++) {
                             JsonObject o = results.get(i).getAsJsonObject();
-                            String q = decodeB64(o.get("question").getAsString());
-                            String a = decodeB64(o.get("correct_answer").getAsString());
-                            if (q != null && !q.isBlank() && a != null && !a.isBlank()) {
-                                queue.addLast(new TriviaQuestion(q, a));
-                                added++;
+
+                            String qText = decodeB64(o.get("question").getAsString());
+                            String correct = decodeB64(o.get("correct_answer").getAsString());
+
+                            List<String> options = new ArrayList<>();
+                            // Add incorrect answers (base64 decode each)
+                            if (o.has("incorrect_answers")) {
+                                JsonArray arr = o.getAsJsonArray("incorrect_answers");
+                                for (JsonElement je : arr) {
+                                    options.add(decodeB64(je.getAsString()));
+                                }
                             }
+                            // Add the correct one
+                            options.add(correct);
+
+                            // Shuffle to randomize order
+                            Collections.shuffle(options, ThreadLocalRandom.current());
+
+                            // Determine the index of the correct answer after shuffle
+                            int correctIdx = -1;
+                            for (int j = 0; j < options.size(); j++) {
+                                if (Objects.equals(options.get(j), correct)) {
+                                    correctIdx = j;
+                                    break;
+                                }
+                            }
+                            if (qText == null || qText.isBlank() || correctIdx < 0) continue;
+
+                            queue.addLast(new TriviaQuestion(qText, options, correctIdx));
+                            added++;
                         }
                         getLogger().info("Fetched " + added + " questions (queue=" + queue.size() + ")");
                     } catch (Exception e) {
@@ -245,8 +272,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
         try {
             return new String(Base64.getDecoder().decode(s), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
-            // If OpenTriviaDB encoding changes or isn't base64, return raw
-            return s;
+            return s; // if not actually base64
         }
     }
 
