@@ -34,7 +34,6 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     private int betweenQuestionsDelayTicks;
     private int fetchBatchSize;
     private boolean triviaEnabled;
-
     private boolean cycleActive = false;
 
     @Override
@@ -141,35 +140,41 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     private void runOneCycleOrWait() {
         if (!triviaEnabled || !cycleActive) return;
 
+        // Skip if no players online
+        if (Bukkit.getOnlinePlayers().isEmpty()) {
+            getLogger().fine("No players online; pausing trivia cycle...");
+            Bukkit.getScheduler().runTaskLater(this, this::runOneCycleOrWait, 20L * 10); // retry in 10s
+            return;
+        }
+
+        // Top up queue if needed
         if (queue.size() < Math.max(5, fetchBatchSize / 4) && !fetching.get()) {
             fetchQuestionsAsync(fetchBatchSize);
         }
 
         TriviaQuestion q = queue.pollFirst();
         if (q == null) {
-            // Wait for fetch to complete
             Bukkit.getScheduler().runTaskLater(this, this::runOneCycleOrWait, 20L * 5);
             return;
         }
 
-        // Post the question + randomized choices
+        // Post question + choices
         broadcastPrefixed(ChatColor.LIGHT_PURPLE + "Question: " + ChatColor.RESET + q.question());
         List<String> choices = q.choices();
         char[] letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
         for (int i = 0; i < choices.size(); i++) {
-            String line = ChatColor.GRAY + "  " + letters[i] + ") " + ChatColor.WHITE + choices.get(i);
-            broadcastPrefixed(line);
+            broadcastPrefixed(ChatColor.GRAY + "  " + letters[i] + ") " + ChatColor.WHITE + choices.get(i));
         }
 
-        // After answer delay, post the correct answer (letter + text)
+        // Schedule answer reveal
         Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (!triviaEnabled || !cycleActive) return;
-            int idx = q.correctIndex();
-            String answerLine = ChatColor.GREEN + "Answer: " + ChatColor.RESET
-                    + letters[idx] + ") " + choices.get(idx);
-            broadcastPrefixed(answerLine);
+            if (!triviaEnabled || !cycleActive || Bukkit.getOnlinePlayers().isEmpty()) return;
 
-            // After between-questions delay, continue
+            int idx = q.correctIndex();
+            broadcastPrefixed(ChatColor.GREEN + "Answer: " + ChatColor.RESET +
+                    letters[idx] + ") " + choices.get(idx));
+
+            // Wait before next
             Bukkit.getScheduler().runTaskLater(this, () -> {
                 if (!triviaEnabled || !cycleActive) return;
                 runOneCycleOrWait();
@@ -179,6 +184,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     }
 
     private void broadcastPrefixed(String message) {
+        if (Bukkit.getOnlinePlayers().isEmpty()) return; // skip silent broadcast
         String prefix = ChatColor.translateAlternateColorCodes('&', chatPrefix);
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.sendMessage(prefix + message);
@@ -189,12 +195,18 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     /* ------------------ Fetching ------------------ */
 
     private CompletableFuture<Void> fetchQuestionsAsync(int amount) {
+        // Don't fetch if no players online (to conserve API calls)
+        if (Bukkit.getOnlinePlayers().isEmpty()) {
+            getLogger().fine("Skipping fetch: no players online.");
+            return CompletableFuture.completedFuture(null);
+        }
+
         if (!fetching.compareAndSet(false, true)) {
             return CompletableFuture.completedFuture(null);
         }
 
         String baseUrl = getConfig().getString("opentdb.url", "https://opentdb.com/api.php");
-        String type = Objects.toString(getConfig().getString("opentdb.type", ""), ""); // allow any/boolean/multiple
+        String type = Objects.toString(getConfig().getString("opentdb.type", ""), "");
         String encode = Objects.toString(getConfig().getString("opentdb.encode", "base64"), "base64");
 
         String url = baseUrl + "?amount=" + amount
@@ -214,50 +226,35 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
                     }
                     try {
                         JsonObject root = JsonParser.parseString(body).getAsJsonObject();
-                        if (!root.has("response_code")) {
-                            getLogger().warning("OpenTriviaDB: missing response_code");
-                            return null;
-                        }
                         int code = root.get("response_code").getAsInt();
                         if (code != 0) {
                             getLogger().warning("OpenTriviaDB response_code=" + code + " (no questions added)");
                             return null;
                         }
+
                         JsonArray results = root.getAsJsonArray("results");
                         int added = 0;
-                        for (int i = 0; i < results.size(); i++) {
-                            JsonObject o = results.get(i).getAsJsonObject();
-
+                        for (JsonElement element : results) {
+                            JsonObject o = element.getAsJsonObject();
                             String qText = decodeB64(o.get("question").getAsString());
                             String correct = decodeB64(o.get("correct_answer").getAsString());
 
                             List<String> options = new ArrayList<>();
-                            // Add incorrect answers (base64 decode each)
                             if (o.has("incorrect_answers")) {
-                                JsonArray arr = o.getAsJsonArray("incorrect_answers");
-                                for (JsonElement je : arr) {
+                                for (JsonElement je : o.getAsJsonArray("incorrect_answers")) {
                                     options.add(decodeB64(je.getAsString()));
                                 }
                             }
-                            // Add the correct one
                             options.add(correct);
-
-                            // Shuffle to randomize order
                             Collections.shuffle(options, ThreadLocalRandom.current());
 
-                            // Determine the index of the correct answer after shuffle
-                            int correctIdx = -1;
-                            for (int j = 0; j < options.size(); j++) {
-                                if (Objects.equals(options.get(j), correct)) {
-                                    correctIdx = j;
-                                    break;
-                                }
-                            }
+                            int correctIdx = options.indexOf(correct);
                             if (qText == null || qText.isBlank() || correctIdx < 0) continue;
 
                             queue.addLast(new TriviaQuestion(qText, options, correctIdx));
                             added++;
                         }
+
                         getLogger().info("Fetched " + added + " questions (queue=" + queue.size() + ")");
                     } catch (Exception e) {
                         getLogger().warning("Error parsing trivia: " + e.getMessage());
@@ -272,7 +269,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
         try {
             return new String(Base64.getDecoder().decode(s), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
-            return s; // if not actually base64
+            return s;
         }
     }
 
