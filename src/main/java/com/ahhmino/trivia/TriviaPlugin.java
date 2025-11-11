@@ -208,9 +208,13 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
         String baseUrl = getConfig().getString("opentdb.url", "https://opentdb.com/api.php");
         String type = Objects.toString(getConfig().getString("opentdb.type", ""), "");
         String encode = Objects.toString(getConfig().getString("opentdb.encode", "base64"), "base64");
+        String category = Objects.toString(getConfig().getString("opentdb.category", ""), "");
+        String difficulty = Objects.toString(getConfig().getString("opentdb.difficulty", "easy"), "easy");
 
         String url = baseUrl + "?amount=" + amount
                 + (type.isBlank() ? "" : "&type=" + type)
+                + (category.isBlank() ? "" : "&category=" + type)
+                + (difficulty.isBlank() ? "" : "&difficulty=" + type)
                 + (encode.isBlank() ? "" : "&encode=" + encode);
 
         getLogger().info("Fetching trivia from: " + url);
