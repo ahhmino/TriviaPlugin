@@ -34,7 +34,10 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
     private int betweenQuestionsDelayTicks;
     private int fetchBatchSize;
     private boolean triviaEnabled;
+
+    // Loop control
     private boolean cycleActive = false;
+    private int loopGeneration = 0;
 
     @Override
     public void onEnable() {
@@ -46,7 +49,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
             getCommand("trivia").setTabCompleter(this);
         }
 
-        fetchQuestionsAsync(fetchBatchSize).thenRun(() -> {
+        fetchQuestionsAsync().thenRun(() -> {
             if (triviaEnabled) startLoopIfNeeded();
         });
 
@@ -89,21 +92,25 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
             case "status" -> {
                 sender.sendMessage(ChatColor.AQUA + "Trivia is " + (triviaEnabled ? "ENABLED" : "DISABLED")
                         + ChatColor.GRAY + " | Queue=" + queue.size()
-                        + " | Active=" + cycleActive);
+                        + " | Active=" + cycleActive
+                        + " | Gen=" + loopGeneration);
             }
             case "reload" -> {
                 reloadConfig();
                 loadSettings(getConfig());
                 sender.sendMessage(ChatColor.GREEN + "Trivia config reloaded.");
-                if (queue.isEmpty() && !fetching.get()) fetchQuestionsAsync(fetchBatchSize);
+                if (queue.isEmpty() && !fetching.get()) fetchQuestionsAsync();
                 if (triviaEnabled) startLoopIfNeeded();
             }
             case "now" -> {
                 if (!triviaEnabled) {
                     sender.sendMessage(ChatColor.YELLOW + "Trivia is disabled. Use /trivia enable first.");
                 } else {
-                    runOneCycleOrWait();
-                    sender.sendMessage(ChatColor.GREEN + "Triggered next trivia cycle.");
+                    loopGeneration++;
+                    cycleActive = true;
+                    int myGen = loopGeneration;
+                    runOneCycleOrWait(myGen);
+                    sender.sendMessage(ChatColor.GREEN + "Triggered next trivia cycle (reset loop).");
                 }
             }
             default -> sender.sendMessage(ChatColor.YELLOW + "Usage: /trivia <enable|disable|status|reload|now>");
@@ -125,40 +132,41 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
         return Collections.emptyList();
     }
 
-    /* ------------------ Loop ------------------ */
+    /* ------------------ Loop & Generation Control ------------------ */
 
     private void startLoopIfNeeded() {
-        if (!triviaEnabled || cycleActive) return;
+        if (!triviaEnabled) return;
+        if (cycleActive) return;
+
         cycleActive = true;
-        runOneCycleOrWait();
+        loopGeneration++;
+        int myGen = loopGeneration;
+        runOneCycleOrWait(myGen);
     }
 
     private void stopLoop() {
         cycleActive = false;
+        loopGeneration++;
     }
 
-    private void runOneCycleOrWait() {
-        if (!triviaEnabled || !cycleActive) return;
+    private void runOneCycleOrWait(int gen) {
+        if (!triviaEnabled || !cycleActive || gen != loopGeneration) return;
 
-        // Skip if no players online
         if (Bukkit.getOnlinePlayers().isEmpty()) {
-            getLogger().fine("No players online; pausing trivia cycle...");
-            Bukkit.getScheduler().runTaskLater(this, this::runOneCycleOrWait, 20L * 10); // retry in 10s
+            Bukkit.getScheduler().runTaskLater(this, () -> runOneCycleOrWait(gen), 20L * 10);
             return;
         }
 
-        // Top up queue if needed
         if (queue.size() < Math.max(5, fetchBatchSize / 4) && !fetching.get()) {
-            fetchQuestionsAsync(fetchBatchSize);
+            fetchQuestionsAsync();
         }
 
         TriviaQuestion q = queue.pollFirst();
         if (q == null) {
-            Bukkit.getScheduler().runTaskLater(this, this::runOneCycleOrWait, 20L * 5);
+            Bukkit.getScheduler().runTaskLater(this, () -> runOneCycleOrWait(gen), 20L * 5);
             return;
         }
 
-        // Post question + choices
         broadcastPrefixed(ChatColor.LIGHT_PURPLE + "Question: " + ChatColor.RESET + q.question());
         List<String> choices = q.choices();
         char[] letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
@@ -166,25 +174,25 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
             broadcastPrefixed(ChatColor.GRAY + "  " + letters[i] + ") " + ChatColor.WHITE + choices.get(i));
         }
 
-        // Schedule answer reveal
         Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (!triviaEnabled || !cycleActive || Bukkit.getOnlinePlayers().isEmpty()) return;
+            if (!triviaEnabled || !cycleActive || gen != loopGeneration) return;
+            if (Bukkit.getOnlinePlayers().isEmpty()) return;
 
             int idx = q.correctIndex();
-            broadcastPrefixed(ChatColor.GREEN + "Answer: " + ChatColor.RESET +
-                    letters[idx] + ") " + choices.get(idx));
+            String answerLine = ChatColor.GREEN + "Answer: " + ChatColor.RESET
+                    + letters[idx] + ") " + choices.get(idx);
+            broadcastPrefixed(answerLine);
 
-            // Wait before next
             Bukkit.getScheduler().runTaskLater(this, () -> {
-                if (!triviaEnabled || !cycleActive) return;
-                runOneCycleOrWait();
+                if (!triviaEnabled || !cycleActive || gen != loopGeneration) return;
+                runOneCycleOrWait(gen);
             }, betweenQuestionsDelayTicks);
 
         }, answerDelayTicks);
     }
 
     private void broadcastPrefixed(String message) {
-        if (Bukkit.getOnlinePlayers().isEmpty()) return; // skip silent broadcast
+        if (Bukkit.getOnlinePlayers().isEmpty()) return;
         String prefix = ChatColor.translateAlternateColorCodes('&', chatPrefix);
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.sendMessage(prefix + message);
@@ -194,8 +202,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
 
     /* ------------------ Fetching ------------------ */
 
-    private CompletableFuture<Void> fetchQuestionsAsync(int amount) {
-        // Don't fetch if no players online (to conserve API calls)
+    private CompletableFuture<Void> fetchQuestionsAsync() {
         if (Bukkit.getOnlinePlayers().isEmpty()) {
             getLogger().fine("Skipping fetch: no players online.");
             return CompletableFuture.completedFuture(null);
@@ -205,21 +212,25 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
             return CompletableFuture.completedFuture(null);
         }
 
-        String baseUrl = getConfig().getString("opentdb.url", "https://opentdb.com/api.php");
-        String type = Objects.toString(getConfig().getString("opentdb.type", ""), "");
-        String encode = Objects.toString(getConfig().getString("opentdb.encode", "base64"), "base64");
-        String category = Objects.toString(getConfig().getString("opentdb.category", ""), "");
-        String difficulty = Objects.toString(getConfig().getString("opentdb.difficulty", "easy"), "easy");
+        FileConfiguration cfg = getConfig();
+        int amount = Math.max(1, cfg.getInt("amount", 50));
+        String baseUrl = cfg.getString("opentdb.url", "https://opentdb.com/api.php");
+        String category = cfg.getString("category", "");
+        String difficulty = cfg.getString("difficulty", "");
+        String type = cfg.getString("type", "");
+        String encode = cfg.getString("encode", "base64");
 
-        String url = baseUrl + "?amount=" + amount
-                + (type.isBlank() ? "" : "&type=" + type)
-                + (category.isBlank() ? "" : "&category=" + type)
-                + (difficulty.isBlank() ? "" : "&difficulty=" + type)
-                + (encode.isBlank() ? "" : "&encode=" + encode);
+        StringBuilder url = new StringBuilder(baseUrl)
+                .append("?amount=").append(amount);
+
+        if (category != null && !category.isBlank()) url.append("&category=").append(category);
+        if (difficulty != null && !difficulty.isBlank()) url.append("&difficulty=").append(difficulty);
+        if (type != null && !type.isBlank()) url.append("&type=").append(type);
+        if (encode != null && !encode.isBlank()) url.append("&encode=").append(encode);
 
         getLogger().info("Fetching trivia from: " + url);
 
-        HttpRequest req = HttpRequest.newBuilder(URI.create(url)).GET().build();
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url.toString())).GET().build();
 
         return http.sendAsync(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 .thenApply(HttpResponse::body)
@@ -240,8 +251,10 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
                         int added = 0;
                         for (JsonElement element : results) {
                             JsonObject o = element.getAsJsonObject();
+
                             String qText = decodeB64(o.get("question").getAsString());
                             String correct = decodeB64(o.get("correct_answer").getAsString());
+                            if (qText == null || qText.isBlank() || correct == null || correct.isBlank()) continue;
 
                             List<String> options = new ArrayList<>();
                             if (o.has("incorrect_answers")) {
@@ -253,7 +266,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
                             Collections.shuffle(options, ThreadLocalRandom.current());
 
                             int correctIdx = options.indexOf(correct);
-                            if (qText == null || qText.isBlank() || correctIdx < 0) continue;
+                            if (correctIdx < 0) continue;
 
                             queue.addLast(new TriviaQuestion(qText, options, correctIdx));
                             added++;
