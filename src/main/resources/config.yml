@@ -12,4 +12,4 @@ type: ""              # multiple | boolean | omit for any
 encode: "base64"      # base64 decodes cleanly in Java (avoid HTML entities)
 
 opentdb:
-  url: "https://opentdb.com/api.php?"
+  url: "https://opentdb.com/api.php"
