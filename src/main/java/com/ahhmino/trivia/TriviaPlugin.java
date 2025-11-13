@@ -214,7 +214,7 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor {
 
         FileConfiguration cfg = getConfig();
         int amount = Math.max(1, cfg.getInt("amount", 50));
-        String baseUrl = cfg.getString("opentdb.url", "https://opentdb.com/api.php");
+        String baseUrl = cfg.getString("opentdb.url", "https://opentdb.com/api.php?");
         String category = cfg.getString("category", "");
         String difficulty = cfg.getString("difficulty", "");
         String type = cfg.getString("type", "");
