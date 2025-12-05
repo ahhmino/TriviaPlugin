@@ -136,14 +136,19 @@ public final class TriviaPlugin extends JavaPlugin implements TabExecutor, Liste
             case "now" -> {
                 if (!triviaEnabled) {
                     sender.sendMessage(ChatColor.YELLOW + "Trivia is disabled. Use /trivia enable first.");
-                } else {
-                    loopGeneration++;
-                    cycleActive = true;
-                    int myGen = loopGeneration;
-                    runOneCycleOrWait(myGen);
-                    sender.sendMessage(ChatColor.GREEN + "Triggered next trivia cycle (reset loop).");
+                    return true;
                 }
+
+                stopLoop();              // kill any old scheduled tasks
+                cycleActive = true;
+
+                loopGeneration++;        // single increment only
+                int myGen = loopGeneration;
+
+                runOneCycleOrWait(myGen);
+                sender.sendMessage(ChatColor.GREEN + "Trivia cycle forced to run now.");
             }
+
 
             // --- CONFIG COMMANDS ---
 

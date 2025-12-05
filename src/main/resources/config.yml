@@ -7,7 +7,7 @@ start_enabled: false
 # OpenTriviaDB parameters
 amount: 100
 category: ""          # omit for any
-difficulty: "easy"    # easy | medium | hard | omit for any
+difficulty: ""        # easy | medium | hard | omit for any
 type: ""              # multiple | boolean | omit for any
 encode: "base64"      # base64 decodes cleanly in Java (avoid HTML entities)
 
